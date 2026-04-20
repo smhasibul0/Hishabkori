@@ -120,8 +120,8 @@ Route::middleware('auth')->group(function () {
         Route::post('/purchase/store', [PurchaseController::class, 'storePurchase'])->name('store.purchase');
         
         // ⭐ AJAX routes MUST come BEFORE the {id} route
-        Route::get('/purchase/search-products',  [PurchaseController::class, 'searchProducts'])->name('purchase.search.products');
-        Route::get('/purchase/payment-accounts', [PurchaseController::class, 'getPaymentAccounts'])->name('purchase.payment.accounts');
+        Route::get('/purchase/search-products',  [PurchaseController::class, 'searchProducts'])->name('purchase.search-products');
+        Route::get('/purchase/payment-accounts', [PurchaseController::class, 'getPaymentAccounts'])->name('purchase.payment-accounts');
         
         // ⭐ Generic routes with parameters come LAST
         Route::get('/purchase/{id}',   [PurchaseController::class, 'viewPurchase'])->name('view.purchase');

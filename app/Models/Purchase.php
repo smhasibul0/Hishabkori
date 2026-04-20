@@ -13,13 +13,15 @@ class Purchase extends Model
     protected $guarded = [];
 
     protected $casts = [
-        'date'             => 'datetime',
-        'grand_total'      => 'decimal:2',
-        'total_before_tax' => 'decimal:2',
+        'purchase_date'    => 'datetime',   // actual column name in migration
+        'purchase_total'   => 'decimal:2',  // actual column name in migration
+        'subtotal'         => 'decimal:2',
+        'net_total'        => 'decimal:2',
         'tax_amount'       => 'decimal:2',
         'discount_amount'  => 'decimal:2',
         'shipping_charges' => 'decimal:2',
-        'purchase_total'   => 'decimal:2',
+        'amount_paid'      => 'decimal:2',
+        'amount_due'       => 'decimal:2',
     ];
 
     /* ─── Relationships ─── */
@@ -31,7 +33,7 @@ class Purchase extends Model
 
     public function location()
     {
-        return $this->belongsTo(Warehouse::class);
+        return $this->belongsTo(WareHouse::class, 'business_location_id');
     }
 
     public function items()
@@ -46,19 +48,31 @@ class Purchase extends Model
 
     public function addedBy()
     {
-        return $this->belongsTo(User::class, 'added_by');
+        return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function additionalExpenses()
+    {
+        return $this->hasMany(PurchaseAdditionalExpense::class);
     }
 
     /* ─── Accessors ─── */
 
     public function getTotalPaidAttribute(): float
     {
-        return $this->payments()->sum('amount');
+        return (float) $this->payments()->sum('amount');
     }
 
+    // Uses 'purchase_total' — the actual DB column
     public function getPaymentDueAttribute(): float
     {
-        return max(0, $this->grand_total - $this->total_paid);
+        return max(0, (float) $this->purchase_total - $this->total_paid);
+    }
+
+    // Alias so views/JSON can use 'grand_total' if needed
+    public function getGrandTotalAttribute(): float
+    {
+        return (float) $this->purchase_total;
     }
 
     /* ─── Scopes ─── */
@@ -80,22 +94,18 @@ class Purchase extends Model
 
     public function scopeDateRange($query, $from, $to)
     {
-        return $query->whereBetween('date', [$from, $to]);
+        return $query->whereBetween('purchase_date', [$from, $to]);
     }
 
     /* ─── Helpers ─── */
 
     public static function generateReferenceNo(): string
     {
-        $year  = now()->format('Y');
-        $last  = static::whereYear('created_at', $year)->max('id') ?? 0;
+        $year = now()->format('Y');
+        $last = static::whereYear('created_at', $year)->max('id') ?? 0;
         return 'PO' . $year . '/' . str_pad($last + 1, 4, '0', STR_PAD_LEFT);
     }
-    public function additionalExpenses()
-    {
-        return $this->hasMany(PurchaseAdditionalExpense::class);
-    }
 
-    // Add this so total_paid and payment_due always appear in JSON responses
-    protected $appends = ['total_paid', 'payment_due'];
+    // Append these so they always appear in JSON responses
+    protected $appends = ['total_paid', 'payment_due', 'grand_total'];
 }

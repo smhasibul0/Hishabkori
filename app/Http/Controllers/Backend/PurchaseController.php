@@ -26,7 +26,7 @@ class PurchaseController extends Controller
     {
         $purchases = Purchase::with(['supplier', 'location', 'payments', 'items.product', 'addedBy'])
             ->latest()
-            ->paginate(request('per_page', 100));
+            ->get();
 
         return view('admin.backend.purchase.all_purchase', compact('purchases'));
     }
@@ -48,39 +48,45 @@ class PurchaseController extends Controller
 
     // ──────────────────────────────────────────────────────────
     // AJAX: Search Products
-    // GET /purchase/search-products?q=...
     // ──────────────────────────────────────────────────────────
     public function searchProducts(Request $request)
     {
-        $q = $request->get('q', '');
+        $query = $request->get('q', '');
 
-        $products = Product::where('is_active', 1)
-            ->where(function ($query) use ($q) {
-                $query->where('product_name', 'LIKE', "%{$q}%")
-                      ->orWhere('product_code', 'LIKE', "%{$q}%");
-            })
-            ->limit(20)
-            ->get(['id', 'product_name', 'product_code', 'purchase_price', 'selling_price', 'quantity', 'unit']);
+        if (strlen($query) < 2) {
+            return response()->json(['products' => []]);
+        }
+
+        $products = Product::where('product_name', 'like', '%' . $query . '%')
+                        ->orWhere('product_code', 'like', '%' . $query . '%')
+                        ->select('id', 'product_name', 'product_code', 'quantity', 'purchase_price', 'selling_price')
+                        ->limit(15)
+                        ->get();
 
         return response()->json(['products' => $products]);
     }
 
     // ──────────────────────────────────────────────────────────
     // AJAX: Payment Accounts by Method
-    // GET /purchase/payment-accounts?method_id=...
     // ──────────────────────────────────────────────────────────
     public function getPaymentAccounts(Request $request)
     {
-        $accounts = PaymentAccount::where('payment_method_id', $request->method_id)
-            ->where('is_active', 1)
-            ->orderBy('name')
-            ->get(['id', 'name', 'account_number']);
+        $methodId = $request->get('method_id');
+
+        if (!$methodId) {
+            return response()->json(['accounts' => []]);
+        }
+
+        $accounts = PaymentAccount::where('payment_method_id', $methodId)
+                                ->where('is_active', true)
+                                ->select('id', 'name', 'account_number')
+                                ->get();
 
         return response()->json(['accounts' => $accounts]);
     }
 
     // ──────────────────────────────────────────────────────────
-    // Store Purchase — saves EVERYTHING including multiple payments
+    // Store Purchase
     // ──────────────────────────────────────────────────────────
     public function storePurchase(Request $request)
     {
@@ -110,10 +116,8 @@ class PurchaseController extends Controller
         try {
             // ── 1. Calculate totals ─────────────────────────────────
 
-            // Subtotal from line items
             $subtotal = array_sum(array_column($products, 'line_total'));
 
-            // Order-level discount
             $discountType   = $request->discount_type ?? 'none';
             $discountValue  = (float) ($request->discount_value ?? 0);
             $discountAmount = 0;
@@ -122,28 +126,26 @@ class PurchaseController extends Controller
 
             $afterDiscount = $subtotal - $discountAmount;
 
-            // Tax
             $taxRate   = (float) ($request->purchase_tax ?? 0);
             $taxAmount = $afterDiscount * ($taxRate / 100);
             $netTotal  = $afterDiscount + $taxAmount;
 
-            // Shipping + extra expenses
             $shippingCharges = (float) ($request->shipping_charges ?? 0);
             $extraExpenses   = 0;
-            $expenseNames    = $request->expense_name    ?? [];
-            $expenseAmounts  = $request->expense_amount  ?? [];
+            $expenseNames    = $request->expense_name   ?? [];
+            $expenseAmounts  = $request->expense_amount ?? [];
             foreach ($expenseAmounts as $a) $extraExpenses += (float) $a;
 
-            $purchaseTotal = $netTotal + $shippingCharges + $extraExpenses;
+            // grand_total = everything included
+            $grandTotal = $netTotal + $shippingCharges + $extraExpenses;
 
-            // ── 2. Total paid across ALL payment rows ───────────────
+            // ── 2. Total paid ───────────────────────────────────────
 
             $paymentAmounts  = $request->payment_amount  ?? [];
             $paymentDates    = $request->paid_on          ?? [];
             $paymentMethods  = $request->payment_method   ?? [];
             $paymentAccounts = $request->payment_account  ?? [];
 
-            // Sum only rows where amount > 0 AND method is selected
             $totalPaid = 0;
             foreach ($paymentAmounts as $i => $amt) {
                 $amt = (float) $amt;
@@ -152,17 +154,17 @@ class PurchaseController extends Controller
                 }
             }
 
-            // Payment status
-            $amountDue = max(0, $purchaseTotal - $totalPaid);
+            $amountDue = max(0, $grandTotal - $totalPaid);
+
             if ($totalPaid <= 0) {
                 $paymentStatus = 'due';
-            } elseif ($totalPaid < $purchaseTotal) {
+            } elseif ($totalPaid < $grandTotal) {
                 $paymentStatus = 'partial';
             } else {
                 $paymentStatus = 'paid';
             }
 
-            // ── 3. Handle document upload ───────────────────────────
+            // ── 3. Document upload ──────────────────────────────────
 
             $documentPath = null;
             if ($request->hasFile('document')) {
@@ -178,13 +180,20 @@ class PurchaseController extends Controller
                 ?: 'PUR-' . strtoupper(uniqid());
 
             // ── 5. Create Purchase record ───────────────────────────
+            //
+            //  FIX: use 'date' (matches model cast + accessor),
+            //       'grand_total' (matches model cast + getPaymentDueAttribute),
+            //       'business_location_id' (matches location() FK),
+            //       'created_by' (matches addedBy() FK).
+            //
 
             $purchase = Purchase::create([
                 'supplier_id'          => $request->supplier_id,
                 'business_location_id' => $request->business_location_id ?: null,
-                'added_by'             => auth()->id(),          // was: created_by
+                'created_by'           => auth()->id(),
                 'reference_no'         => $referenceNo,
-                'date'                 => Carbon::parse($request->purchase_date), // was: purchase_date
+
+                'purchase_date'        => Carbon::parse($request->purchase_date),
                 'purchase_status'      => $request->purchase_status,
                 'pay_term_number'      => $request->pay_term_number ?: null,
                 'pay_term_type'        => $request->pay_term_type   ?: null,
@@ -194,11 +203,13 @@ class PurchaseController extends Controller
                 'purchase_tax_rate'    => $taxRate,
                 'tax_amount'           => round($taxAmount, 2),
                 'shipping_details'     => $request->shipping_details ?: null,
-                'shipping_charges'     => $shippingCharges,
+                'shipping_charges'     => round($shippingCharges, 2),
                 'subtotal'             => round($subtotal, 2),
-                'grand_total'          => round($purchaseTotal, 2), // was: purchase_total
-                'payment_status'       => $paymentStatus,
+                'net_total'            => round($netTotal, 2),
+                'purchase_total'       => round($grandTotal, 2),
                 'amount_paid'          => round($totalPaid, 2),
+                'amount_due'           => round($amountDue, 2),
+                'payment_status'       => $paymentStatus,
                 'additional_notes'     => $request->additional_notes ?: null,
                 'document'             => $documentPath,
             ]);
@@ -225,7 +236,6 @@ class PurchaseController extends Controller
                     'selling_price'            => (float) ($item['selling_price'] ?? 0),
                 ]);
 
-                // Increment stock only on 'received'
                 if ($request->purchase_status === 'received') {
                     Product::where('id', $item['product_id'])->increment('quantity', $qty);
 
@@ -248,20 +258,15 @@ class PurchaseController extends Controller
                 }
             }
 
-            // ── 8. Save MULTIPLE payment records ────────────────────
-            //
-            //  Each index i in the payment_amount[] array is one payment row.
-            //  We save a Payment row only when:
-            //    - amount > 0
-            //    - a payment method is selected
-            //
+            // ── 8. Save payment records ─────────────────────────────
+
             $paymentNote = $request->payment_note;
 
             foreach ($paymentAmounts as $i => $amt) {
-                $amt      = (float) $amt;
-                $methodId = $paymentMethods[$i]  ?? null;
-                $accountId= $paymentAccounts[$i] ?? null;
-                $paidOn   = $paymentDates[$i]    ?? now();
+                $amt       = (float) $amt;
+                $methodId  = $paymentMethods[$i]  ?? null;
+                $accountId = $paymentAccounts[$i] ?? null;
+                $paidOn    = $paymentDates[$i]    ?? now();
 
                 if ($amt > 0 && $methodId) {
                     Payment::create([
@@ -274,6 +279,17 @@ class PurchaseController extends Controller
                         'note'               => $paymentNote,
                     ]);
                 }
+            }
+
+            // ── 9. Update supplier's purchase_due ──────────────────
+            //
+            //  If any amount is still due, add it to the supplier's
+            //  running purchase_due balance.
+            //
+
+            if ($amountDue > 0) {
+                Supplier::where('id', $request->supplier_id)
+                    ->increment('purchase_due', round($amountDue, 2));
             }
 
             DB::commit();
@@ -290,7 +306,7 @@ class PurchaseController extends Controller
     }
 
     // ──────────────────────────────────────────────────────────
-    // View Single Purchase (full details)
+    // View Single Purchase
     // ──────────────────────────────────────────────────────────
     public function viewPurchase($id)
     {
@@ -308,7 +324,7 @@ class PurchaseController extends Controller
     }
 
     // ──────────────────────────────────────────────────────────
-    // Delete Purchase (reverses stock if received)
+    // Delete Purchase (reverses stock AND supplier due if received/due)
     // ──────────────────────────────────────────────────────────
     public function deletePurchase($id)
     {
@@ -316,17 +332,25 @@ class PurchaseController extends Controller
 
         DB::beginTransaction();
         try {
+            // Reverse stock if purchase was received
             if ($purchase->purchase_status === 'received') {
                 foreach ($purchase->items as $item) {
                     Product::where('id', $item->product_id)->decrement('quantity', $item->qty);
                 }
             }
 
-            $purchase->delete(); // cascades to items, payments, expenses
+            // Reverse supplier due balance for whatever is still unpaid
+            $remainingDue = $purchase->amount_due ?? max(0, $purchase->purchase_total - $purchase->amount_paid);
+            if ($remainingDue > 0) {
+                Supplier::where('id', $purchase->supplier_id)
+                    ->decrement('purchase_due', round($remainingDue, 2));
+            }
+
+            $purchase->delete();
 
             DB::commit();
             return redirect()->route('all.purchase')
-                ->with('success', 'Purchase deleted and stock reversed.');
+                ->with('success', 'Purchase deleted and stock/supplier balance reversed.');
 
         } catch (\Exception $e) {
             DB::rollBack();
@@ -334,7 +358,9 @@ class PurchaseController extends Controller
         }
     }
 
-    // AJAX: show purchase details as JSON
+    // ──────────────────────────────────────────────────────────
+    // AJAX: Show purchase as JSON
+    // ──────────────────────────────────────────────────────────
     public function showPurchase($id)
     {
         $purchase = Purchase::with([
@@ -343,13 +369,14 @@ class PurchaseController extends Controller
             'payments.method', 'payments.account',
         ])->findOrFail($id);
 
-        // Append computed attributes so they appear in JSON
         $purchase->append(['total_paid', 'payment_due']);
 
         return response()->json($purchase);
     }
 
-    // Print view
+    // ──────────────────────────────────────────────────────────
+    // Print
+    // ──────────────────────────────────────────────────────────
     public function printPurchase($id)
     {
         $purchase = Purchase::with([
@@ -359,7 +386,9 @@ class PurchaseController extends Controller
         return view('admin.backend.purchase.print_purchase', compact('purchase'));
     }
 
-    // Download attached document
+    // ──────────────────────────────────────────────────────────
+    // Download document
+    // ──────────────────────────────────────────────────────────
     public function downloadDocument($id)
     {
         $purchase = Purchase::findOrFail($id);
@@ -371,7 +400,9 @@ class PurchaseController extends Controller
         return response()->download(public_path($purchase->document));
     }
 
-    // View attached document in browser
+    // ──────────────────────────────────────────────────────────
+    // View document in browser
+    // ──────────────────────────────────────────────────────────
     public function viewDocument($id)
     {
         $purchase = Purchase::findOrFail($id);
@@ -383,7 +414,10 @@ class PurchaseController extends Controller
         return response()->file(public_path($purchase->document));
     }
 
+    // ──────────────────────────────────────────────────────────
     // AJAX: Add a single payment to an existing purchase
+    // Also updates supplier purchase_due accordingly
+    // ──────────────────────────────────────────────────────────
     public function addPayment(Request $request, $id)
     {
         $purchase = Purchase::findOrFail($id);
@@ -406,20 +440,22 @@ class PurchaseController extends Controller
                 $documentPath = 'upload/purchase_documents/' . $filename;
             }
 
+            $paymentAmount = round((float) $request->amount, 2);
+
             Payment::create([
                 'purchase_id'        => $purchase->id,
                 'payment_method_id'  => $request->payment_method,
                 'payment_account_id' => $request->payment_account_id ?: null,
-                'amount'             => round((float) $request->amount, 2),
+                'amount'             => $paymentAmount,
                 'paid_on'            => Carbon::parse($request->paid_on),
                 'type'               => 'purchase_payment',
                 'note'               => $request->payment_note,
                 'document'           => $documentPath,
             ]);
 
-            // Recalculate totals on the purchase
-            $totalPaid = $purchase->payments()->sum('amount');
-            $amountDue = max(0, $purchase->purchase_total - $totalPaid);
+            // Recalculate totals
+            $totalPaid    = $purchase->payments()->sum('amount');
+            $newAmountDue = max(0, $purchase->purchase_total - $totalPaid);
 
             if ($totalPaid <= 0) {
                 $status = 'due';
@@ -429,11 +465,20 @@ class PurchaseController extends Controller
                 $status = 'paid';
             }
 
+            $oldAmountDue = $purchase->amount_due ?? 0;
+
             $purchase->update([
                 'amount_paid'    => round($totalPaid, 2),
-                'amount_due'     => round($amountDue, 2),
+                'amount_due'     => round($newAmountDue, 2),
                 'payment_status' => $status,
             ]);
+
+            // Reduce supplier due by how much the due balance decreased
+            $dueReduction = $oldAmountDue - $newAmountDue;
+            if ($dueReduction > 0) {
+                Supplier::where('id', $purchase->supplier_id)
+                    ->decrement('purchase_due', round($dueReduction, 2));
+            }
 
             DB::commit();
             return response()->json(['success' => true]);
@@ -444,7 +489,9 @@ class PurchaseController extends Controller
         }
     }
 
-    // AJAX: View all payments for a purchase as JSON
+    // ──────────────────────────────────────────────────────────
+    // AJAX: View all payments for a purchase
+    // ──────────────────────────────────────────────────────────
     public function viewPayments($id)
     {
         $purchase = Purchase::with([
@@ -455,6 +502,9 @@ class PurchaseController extends Controller
         return response()->json($purchase);
     }
 
+    // ──────────────────────────────────────────────────────────
+    // Edit Purchase form
+    // ──────────────────────────────────────────────────────────
     public function editPurchase($id)
     {
         $purchase = Purchase::with(['items', 'additionalExpenses', 'payments'])->findOrFail($id);
