@@ -114,15 +114,24 @@ Route::middleware('auth')->group(function () {
         Route::delete('/account-types/{id}',  [AccountTypeController::class, 'destroy'])->name('account.type.delete');
     });
     Route::controller(PurchaseController::class)->group(function () {
-         // Pages
+        // Pages
         Route::get('/purchase/all',    [PurchaseController::class, 'allPurchase'])->name('all.purchase');
         Route::get('/purchase/add',    [PurchaseController::class, 'addPurchase'])->name('add.purchase');
         Route::post('/purchase/store', [PurchaseController::class, 'storePurchase'])->name('store.purchase');
-        Route::get('/purchase/{id}',   [PurchaseController::class, 'viewPurchase'])->name('view.purchase');
-        Route::get('/purchase/delete/{id}', [PurchaseController::class, 'deletePurchase'])->name('delete.purchase');
-    
-        // AJAX
+        
+        // ⭐ AJAX routes MUST come BEFORE the {id} route
         Route::get('/purchase/search-products',  [PurchaseController::class, 'searchProducts'])->name('purchase.search.products');
         Route::get('/purchase/payment-accounts', [PurchaseController::class, 'getPaymentAccounts'])->name('purchase.payment.accounts');
+        
+        // ⭐ Generic routes with parameters come LAST
+        Route::get('/purchase/{id}',   [PurchaseController::class, 'viewPurchase'])->name('view.purchase');
+        Route::get('/purchase/delete/{id}', [PurchaseController::class, 'deletePurchase'])->name('delete.purchase');
+        Route::get('/purchase/{id}/show',             [PurchaseController::class, 'showPurchase'])->name('purchases.show');
+        Route::get('/purchase/{id}/print',            [PurchaseController::class, 'printPurchase'])->name('purchases.print');
+        Route::get('/purchase/{id}/download-document',[PurchaseController::class, 'downloadDocument'])->name('purchases.download-document');
+        Route::get('/purchase/{id}/view-document',    [PurchaseController::class, 'viewDocument'])->name('purchases.view-document');
+        Route::post('/purchase/{id}/add-payment',     [PurchaseController::class, 'addPayment'])->name('purchases.add-payment');
+        Route::get('/purchase/{id}/view-payments',    [PurchaseController::class, 'viewPayments'])->name('purchases.view-payments');
+        Route::get('/purchase/edit/{id}', [PurchaseController::class, 'editPurchase'])->name('edit.purchase');
     });
 });

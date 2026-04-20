@@ -24,9 +24,9 @@ class PurchaseController extends Controller
     // ──────────────────────────────────────────────────────────
     public function allPurchase()
     {
-        $purchases = Purchase::with(['supplier', 'payments', 'items.product'])
+        $purchases = Purchase::with(['supplier', 'location', 'payments', 'items.product', 'addedBy'])
             ->latest()
-            ->get();
+            ->paginate(request('per_page', 100));
 
         return view('admin.backend.purchase.all_purchase', compact('purchases'));
     }
@@ -182,9 +182,9 @@ class PurchaseController extends Controller
             $purchase = Purchase::create([
                 'supplier_id'          => $request->supplier_id,
                 'business_location_id' => $request->business_location_id ?: null,
-                'created_by'           => auth()->id(),
+                'added_by'             => auth()->id(),          // was: created_by
                 'reference_no'         => $referenceNo,
-                'purchase_date'        => Carbon::parse($request->purchase_date),
+                'date'                 => Carbon::parse($request->purchase_date), // was: purchase_date
                 'purchase_status'      => $request->purchase_status,
                 'pay_term_number'      => $request->pay_term_number ?: null,
                 'pay_term_type'        => $request->pay_term_type   ?: null,
@@ -196,11 +196,9 @@ class PurchaseController extends Controller
                 'shipping_details'     => $request->shipping_details ?: null,
                 'shipping_charges'     => $shippingCharges,
                 'subtotal'             => round($subtotal, 2),
-                'net_total'            => round($netTotal, 2),
-                'purchase_total'       => round($purchaseTotal, 2),
+                'grand_total'          => round($purchaseTotal, 2), // was: purchase_total
                 'payment_status'       => $paymentStatus,
                 'amount_paid'          => round($totalPaid, 2),
-                'amount_due'           => round($amountDue, 2),
                 'additional_notes'     => $request->additional_notes ?: null,
                 'document'             => $documentPath,
             ]);
@@ -218,13 +216,13 @@ class PurchaseController extends Controller
                     'purchase_id'              => $purchase->id,
                     'product_id'               => $item['product_id'],
                     'qty'                      => $qty,
-                    'unit'                     => $item['unit']           ?? 'Pieces',
+                    'unit'                     => $item['unit']          ?? 'Pieces',
                     'unit_cost'                => $unitCost,
                     'discount_percent'         => $discPct,
                     'unit_cost_after_discount' => round($unitCostAftDisc, 2),
                     'line_total'               => $lineTotal,
-                    'profit_margin'            => (float) ($item['profit_margin']  ?? 0),
-                    'selling_price'            => (float) ($item['selling_price']  ?? 0),
+                    'profit_margin'            => (float) ($item['profit_margin'] ?? 0),
+                    'selling_price'            => (float) ($item['selling_price'] ?? 0),
                 ]);
 
                 // Increment stock only on 'received'
@@ -320,8 +318,7 @@ class PurchaseController extends Controller
         try {
             if ($purchase->purchase_status === 'received') {
                 foreach ($purchase->items as $item) {
-                    Product::where('id', $item->product_id)
-                        ->decrement('quantity', $item->qty);
+                    Product::where('id', $item->product_id)->decrement('quantity', $item->qty);
                 }
             }
 
@@ -335,5 +332,139 @@ class PurchaseController extends Controller
             DB::rollBack();
             return back()->withErrors(['error' => 'Delete failed: ' . $e->getMessage()]);
         }
+    }
+
+    // AJAX: show purchase details as JSON
+    public function showPurchase($id)
+    {
+        $purchase = Purchase::with([
+            'supplier', 'location', 'addedBy',
+            'items.product', 'additionalExpenses',
+            'payments.method', 'payments.account',
+        ])->findOrFail($id);
+
+        // Append computed attributes so they appear in JSON
+        $purchase->append(['total_paid', 'payment_due']);
+
+        return response()->json($purchase);
+    }
+
+    // Print view
+    public function printPurchase($id)
+    {
+        $purchase = Purchase::with([
+            'supplier', 'location', 'items.product', 'payments'
+        ])->findOrFail($id);
+
+        return view('admin.backend.purchase.print_purchase', compact('purchase'));
+    }
+
+    // Download attached document
+    public function downloadDocument($id)
+    {
+        $purchase = Purchase::findOrFail($id);
+
+        if (!$purchase->document || !file_exists(public_path($purchase->document))) {
+            return back()->withErrors(['error' => 'Document not found.']);
+        }
+
+        return response()->download(public_path($purchase->document));
+    }
+
+    // View attached document in browser
+    public function viewDocument($id)
+    {
+        $purchase = Purchase::findOrFail($id);
+
+        if (!$purchase->document || !file_exists(public_path($purchase->document))) {
+            abort(404, 'Document not found.');
+        }
+
+        return response()->file(public_path($purchase->document));
+    }
+
+    // AJAX: Add a single payment to an existing purchase
+    public function addPayment(Request $request, $id)
+    {
+        $purchase = Purchase::findOrFail($id);
+
+        $request->validate([
+            'payment_method'     => 'required|string',
+            'paid_on'            => 'required|date',
+            'amount'             => 'required|numeric|min:0.01',
+            'payment_account_id' => 'nullable|exists:payment_accounts,id',
+            'document'           => 'nullable|file|max:5120|mimes:pdf,csv,zip,doc,docx,jpeg,jpg,png',
+        ]);
+
+        DB::beginTransaction();
+        try {
+            $documentPath = null;
+            if ($request->hasFile('document')) {
+                $file         = $request->file('document');
+                $filename     = time() . '_' . $file->getClientOriginalName();
+                $file->move(public_path('upload/purchase_documents'), $filename);
+                $documentPath = 'upload/purchase_documents/' . $filename;
+            }
+
+            Payment::create([
+                'purchase_id'        => $purchase->id,
+                'payment_method_id'  => $request->payment_method,
+                'payment_account_id' => $request->payment_account_id ?: null,
+                'amount'             => round((float) $request->amount, 2),
+                'paid_on'            => Carbon::parse($request->paid_on),
+                'type'               => 'purchase_payment',
+                'note'               => $request->payment_note,
+                'document'           => $documentPath,
+            ]);
+
+            // Recalculate totals on the purchase
+            $totalPaid = $purchase->payments()->sum('amount');
+            $amountDue = max(0, $purchase->purchase_total - $totalPaid);
+
+            if ($totalPaid <= 0) {
+                $status = 'due';
+            } elseif ($totalPaid < $purchase->purchase_total) {
+                $status = 'partial';
+            } else {
+                $status = 'paid';
+            }
+
+            $purchase->update([
+                'amount_paid'    => round($totalPaid, 2),
+                'amount_due'     => round($amountDue, 2),
+                'payment_status' => $status,
+            ]);
+
+            DB::commit();
+            return response()->json(['success' => true]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    // AJAX: View all payments for a purchase as JSON
+    public function viewPayments($id)
+    {
+        $purchase = Purchase::with([
+            'supplier', 'location',
+            'payments.method', 'payments.account',
+        ])->findOrFail($id);
+
+        return response()->json($purchase);
+    }
+
+    public function editPurchase($id)
+    {
+        $purchase = Purchase::with(['items', 'additionalExpenses', 'payments'])->findOrFail($id);
+        $suppliers      = Supplier::orderBy('name')->get();
+        $paymentMethods = AccountType::orderBy('name')->get();
+        $locations      = WareHouse::orderBy('name')->get();
+        $taxes          = Tax::orderBy('name')->get();
+
+        return view('admin.backend.purchase.edit_purchase', compact(
+            'purchase', 'suppliers', 'paymentMethods', 'locations', 'taxes'
+        ));
     }
 }

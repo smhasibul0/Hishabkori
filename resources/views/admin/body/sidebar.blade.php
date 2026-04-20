@@ -145,7 +145,7 @@
                     <div class="collapse" id="sidebarIcons">
                         <ul class="nav-second-level">
                             <li>
-                                <a href="extended-carousel.html" class="tp-link">List Purchases</a>
+                                <a href="{{ route('all.purchase') }}" class="tp-link">List Purchases</a>
                             </li>
                             <li>
                                 <a href="{{ route('add.purchase') }}" class="tp-link">Add Purchase</a>
